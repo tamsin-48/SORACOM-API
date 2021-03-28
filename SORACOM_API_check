@@ -1,0 +1,135 @@
+function SendtoSlack(message) {
+  //var postUrl = debugURL;//debug用
+  var postUrl = postURL;//普段はこっち
+  var username = 'SORACOMbot';  // 通知時に表示されるユーザー名
+  var icon = ':soracom:';  // 通知時に表示されるアイコン
+
+  var jsonData ={
+     "username" : username,
+     "icon_emoji": icon,
+     "text" : message
+  };
+  var payload = JSON.stringify(jsonData);
+  var options ={
+    "method" : "post",
+    "contentType" : "application/json",
+    "payload" : payload
+  };
+  UrlFetchApp.fetch(postUrl, options);
+}
+
+function getToken(access_key_id, secret_access_key) {
+  var scriptProperties = PropertiesService.getScriptProperties().getProperties();
+
+  var data = {
+     authKeyId: access_key_id,
+     authKey: secret_access_key,
+     tokenTimeoutSeconds: 30,
+   };
+ var option = {
+   method : "post", //メソッドの指定
+   payload: JSON.stringify(data), //body情報
+   contentType: "application/json",
+   muteHttpExceptions: true
+ };
+ 
+ var req = UrlFetchApp.fetch("https://api.soracom.io/v1/auth", option);
+
+ var data = JSON.parse(req.getContentText()); //.getContentTextでレスポンステキストを取得
+ var key = data.apiKey, token = data.token;
+ return [key, token];
+}
+
+function onFormSubmit(e) {
+   var link = '<googleFormURL|フォームへの回答はこちらから>'
+
+ //APIキーとトークンの取得
+ var keyId = soracom_keyId;
+ var secret = soracom_secretKey;
+ var KeyAndToken = getToken(keyId, secret);
+ var key = KeyAndToken[0];
+ var token = KeyAndToken[1];
+
+//googleフォームの回答内容の取得
+ var itemResponse = e.response.getItemResponses();
+  for (var j = 0; j < itemResponse.length; j++){    
+    var formData = itemResponse[j];
+    var title = formData.getItem().getTitle();
+    var response = formData.getResponse();
+
+    switch (title) {
+      case "開けるポート番号":
+        var open_port = response;
+        break;
+      case "ポートの使用期間(最大8時間)":
+        var time = response;
+        break;
+      case "追加アクセス元IPアドレスの範囲をCIDR形式（例：12.34.56.78/30）で入力してください":
+        var ip_range = response;
+        break;
+    }
+  }
+ 
+ //IPアドレスレンジが未記入の際は東工大のIPを使用
+ if(ip_range == ""){
+   var ip_range = "131.112.0.0/16";
+ }
+
+ //時間の秒換算
+ var time_cal = time.split(':');
+ var open_time = Number(time_cal[0])*3600 + Number(time_cal[1])*60;
+ if(open_time > 28800){
+   SendtoSlack("`ポートの使用期間が8時間を超えています`\n" + link);
+   return;
+  }
+
+//回答内容からIPアドレスとポートの取得
+ var headers = {
+   "Accept": "application/json",
+   "X-Soracom-API-Key": key,
+   "X-Soracom-Token": token
+  };
+ var data = { 
+  "destination": {
+    "imsi": "440103227906548",
+    "port": parseInt(open_port, 10),
+  },
+   "duration" : open_time,
+   "source": {
+    "ipRanges": [ip_range]
+  },
+  "tlsRequired": false
+  }
+ var option1 = {
+   method : "post", //メソッドの指定
+   headers : headers,
+   payload: JSON.stringify(data), //body情報
+   contentType: "application/json",
+   muteHttpExceptions: true
+ };
+ var req1 = UrlFetchApp.fetch("https://api.soracom.io/v1/port_mappings", option1);
+ var inf = JSON.parse(req1.getContentText());
+ var ipadd = inf.ipAddress, port = inf.port, host = inf.hostname;
+
+ //createPortMappingのエラー処理
+ if(typeof ipadd == "undefined"){
+   var error = inf.message;
+   var message = "```エラーAPI: CreatePortMapping\n" + "エラー内容: " + error + "\n" + link + "```";
+   SendtoSlack(message);
+   return;
+ }
+ 
+//請求額の取得
+ var option2 = {
+   method : "get", //メソッドの指定
+   headers : headers,
+   muteHttpExceptions: true
+ }
+ var req2 = UrlFetchApp.fetch("https://api.soracom.io/v1/bills/latest", option2);
+ var bills = JSON.parse(req2.getContentText());
+ var bill = bills.amount;
+
+//slackに通知
+  var body =  "*回答が来ました*\n" + "```■回答内容" + "\n開けるポート番号: " + open_port + "\nポートの使用期間(最大8時間): " + time + "\n追加アクセス元IPアドレス: " + ip_range + "\n\n■接続先" + "\nホスト: " + host  + "\nIPアドレス: " + ipadd + "\nポート: " + port + "\n\n■現在の請求額 : ¥" + bill  + "\n\n" + link + "```";
+  SendtoSlack(body);
+}
